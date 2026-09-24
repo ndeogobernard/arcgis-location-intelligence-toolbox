@@ -4,13 +4,23 @@
 # =============================================================================
 
 build:
-  source_priority: [S03, S04]     # TxDOT RHiNo primary, OSM gap-fill/alternate
-  # [DECISION] record which source actually produced the delivered network in
-  # ScoreRuns.parameters_json and in the methodology report, Section 7.
+  source_priority: [S04, S03]     # OSM primary (D-004); RHiNo kept for validation
   nd_name: RoadNetwork_ND
   dataset: Transportation
-  connectivity: END_POINT
-  elevation: NONE                 # RHiNo has no reliable z-level field
+  # ANY_VERTEX, not END_POINT, and this is not a preference - it is what the
+  # source requires. OGR hands back whole OSM ways, not ways split at every
+  # junction, so END_POINT connectivity would join them only where one way
+  # happens to end on another's endpoint and the network would be shredded.
+  #
+  # OSM ways that genuinely meet share an identical node, and ways that merely
+  # cross - an overpass over a freeway - do not. Vertex coincidence therefore
+  # already encodes grade separation, which is why no elevation field is
+  # needed: the geometry carries the information that RHiNo would have needed
+  # a z-level column for. Residual risk is mis-mapped OSM data where a bridge
+  # and the road beneath it wrongly share a node; the route validation below
+  # is what would catch it.
+  connectivity: ANY_VERTEX
+  elevation: NONE
   build_after_create: true
 
 # --- Cost and restriction attributes ---
@@ -29,6 +39,16 @@ attributes:
     usage: Restriction
     field: oneway
     # RHiNo/OSM convention: FT = with digitized direction, TF = against, blank = both
+
+  - name: TruckMinutes
+    usage: Cost
+    units: Minutes
+    field: truck_minutes          # miles / truck_speed_mph * 60
+    # Scope 4.6 says the Truck mode uses "impedance Minutes" AND caps truck
+    # speeds below general traffic. Those cannot both be true of one field, so
+    # the capped travel time is a SECOND cost attribute rather than an
+    # overwrite of the first. Driving and Truck then read different columns and
+    # a labour-shed isochrone is not silently computed at truck speeds. D-019.
 
   - name: TruckRestricted
     usage: Restriction
@@ -68,8 +88,8 @@ travel_modes:
     speed_source: posted_then_default
 
   Truck:
-    impedance: Minutes
-    time_attribute: Minutes
+    impedance: TruckMinutes
+    time_attribute: TruckMinutes
     distance_attribute: Miles
     restrictions: [Oneway, TruckRestricted]
     uturn_policy: NO_UTURNS
@@ -82,6 +102,16 @@ travel_modes:
 
 # --- Solver settings (scope 5.2) ---
 service_areas:
+  # `polygon_detail` maps to the classic tool's polygon_type:
+  #   STANDARD -> DETAILED_POLYS, GENERALIZED -> SIMPLE_POLYS.
+  # `merge: NO_MERGE` keeps one polygon set PER CANDIDATE - merging across
+  # facilities would produce a single blob and destroy the per-site measurement
+  # the criteria depend on.
+  # `nesting: DISKS` makes each break cumulative (0-15, 0-30, 0-45) rather than
+  # disjoint rings, because "workers within 30 minutes" means everyone inside
+  # 30, not only those between 15 and 30.
+  merge: NO_MERGE
+  nesting: DISKS
   Driving:
     breaks_min: [15, 30, 45]
     polygon_detail: STANDARD
@@ -111,6 +141,28 @@ od_matrices:
   batch_size: 50
 
 # --- Validation (scope Section 10, network connectivity check) ---
+# Reference routes for the sanity check in scope Section 14. Coordinates are
+# WGS84 city centres. `ref_miles` and `ref_minutes` are typical free-flow
+# driving figures for comparison ONLY - they are approximate reference values,
+# not measurements, and the tolerance below is set wide enough to reflect that.
+# Their job is to catch a network that is broken, not to certify one that is
+# accurate: a disconnected network fails to solve at all, a network with the
+# one-way logic reversed or speeds in the wrong units comes out wildly off, and
+# a network missing a state cannot reach the out-of-state destinations.
+#
+# Four of the seven cross a state line on purpose. A Texas-only network - which
+# is what RHiNo would have given - solves the first three and fails the rest.
+validation_routes:
+  tolerance_pct: 35
+  routes:
+    - {name: "Fort Worth -> Dallas",     from: [-97.3308, 32.7555], to: [-96.7970, 32.7767], ref_miles: 32,  ref_minutes: 35}
+    - {name: "Dallas -> Austin",         from: [-96.7970, 32.7767], to: [-97.7431, 30.2672], ref_miles: 195, ref_minutes: 180}
+    - {name: "Dallas -> Houston",        from: [-96.7970, 32.7767], to: [-95.3698, 29.7604], ref_miles: 239, ref_minutes: 225}
+    - {name: "Dallas -> Oklahoma City",  from: [-96.7970, 32.7767], to: [-97.5164, 35.4676], ref_miles: 206, ref_minutes: 185}
+    - {name: "Dallas -> Shreveport LA",  from: [-96.7970, 32.7767], to: [-93.7502, 32.5252], ref_miles: 190, ref_minutes: 170}
+    - {name: "Dallas -> Little Rock AR", from: [-96.7970, 32.7767], to: [-92.2896, 34.7465], ref_miles: 319, ref_minutes: 285}
+    - {name: "Dallas -> Albuquerque NM", from: [-96.7970, 32.7767], to: [-106.6504, 35.0844], ref_miles: 647, ref_minutes: 570}
+
 validation:
   random_od_pairs: 100
   required_solve_rate: 1.0
